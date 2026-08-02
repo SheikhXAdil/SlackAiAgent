@@ -1,16 +1,20 @@
+import os
+from dotenv import load_dotenv
+from contextlib import asynccontextmanager
+from datetime import datetime
+import httpx
+import re
+import json
+
 from fastapi import FastAPI, HTTPException, Request
+
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
+
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
-from dotenv import load_dotenv
-import httpx
-import os
-from contextlib import asynccontextmanager
-import re
-import json
-from datetime import datetime
+
 from logger import log
 from models import *
 import db
