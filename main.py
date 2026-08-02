@@ -451,10 +451,10 @@ class SlackAgent:
         self.webClient.chat_postMessage(
             channel=os.getenv("SLACK_PRIVATE_CHANNEL_ID"),
             text=f"New member analysis: {member_info.name} ({analysis.fit_score}/100)",
-            blocks=blocks,
             attachments=[
                 {
                     "color": color,
+                    "blocks": blocks
                 }
             ],
         )
