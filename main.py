@@ -8,7 +8,9 @@ from dotenv import load_dotenv
 import httpx
 import os
 import asyncio
+from contextlib import asynccontextmanager
 import re
+import json
 from datetime import datetime
 import logging
 from enum import Enum
@@ -30,14 +32,20 @@ log = {
 client = WebClient()
 
 
-class MemberInfoReqBody(BaseModel):
-    pass
-
-
 class UserProfileInfo(BaseModel):
     first_name: str
     last_name: str
     status_text: str
+
+
+class MemberInfoReqBody(BaseModel):
+    id: str
+    name: str
+    username: str
+    email: str
+    title: str
+    timezone: str
+    profile: UserProfileInfo
 
 
 class UserInfo(BaseModel):
@@ -51,8 +59,9 @@ class UserInfo(BaseModel):
 
 
 class UserResearchDataType(Enum):
-    GITHUB = 'github'
-    COMPANY = 'company'
+    GITHUB = "github"
+    COMPANY = "company"
+
 
 class UserResearchData(BaseModel):
     url: str
@@ -62,12 +71,14 @@ class UserResearchData(BaseModel):
 
 
 class UserAnalysis(BaseModel):
-    pass
+    fit_score: int
+    insights: list[str]
+    recommendations: list[str]
 
 
 class SlackAgent:
     def __init__(self):
-        self.app = FastAPI()
+        self.app = FastAPI(lifespan=self.lifespan)
 
         self.slack = App(
             token=os.environ.get("SLACK_BOT_TOKEN"),
@@ -79,7 +90,7 @@ class SlackAgent:
         self.webClient = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
 
         self.gemini = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-3.1-flash-lite",
             google_api_key=os.environ.get("GOOGLE_API_KEY"),
             temperature=0.3,
             max_output_tokens=2048,
@@ -126,6 +137,33 @@ class SlackAgent:
 
             except Exception as e:
                 log["error"]("Error calling member_joined_channel", e)
+
+    @asynccontextmanager
+    async def lifespan(self, app: FastAPI):
+        self.start_server()
+        yield
+        self.stop_server()
+
+    def start_server(self):
+        try:
+            log["info"]('🗄️ Initilazing database...')
+            # await init_database()
+            slack.slack_handler.connect()
+            log["info"]('⚡️ Slack bot connected')
+            log["info"]('🎉 Slack AI Agent is running!')
+        except Exception as e:
+            log["error"]('Start up error', e)
+            raise
+
+
+    def stop_server(self):
+        try:
+            slack.slack_handler.close()
+            # await close_database()
+            log["info"]('Stopped successfully')
+        except Exception as e:
+            log["error"]('Shutdown error', e)
+            raise
 
     def setup_fast_api(self):
         @self.app.exception_handler(HTTPException)
@@ -181,18 +219,19 @@ class SlackAgent:
         try:
             log["info"](f"Processing info of member: {member_info.name}")
 
-            research_data = self.do_basic_research(member_info)
-            analysis = self.analyze_with_ai(member_info, research_data)
+            research_data = await self.do_basic_research(member_info)
+
+            analysis = await self.analyze_with_ai(member_info, research_data)
 
             log["info"](
-                f"Saving analysis on info of member: {member_info.name} to database"
+                f"Saving analysis on info of member {member_info.name} to database"
             )
 
             analysis_id = await self.save_member_analysis(
                 member_info, analysis, research_data
             )
 
-            await self.post_analysis_to_channel(member_info, analysis, research_data)
+            await self.post_analysis_to_channel(member_info, analysis)
 
             if analysis_id:
                 await self.mark_sent_to_slack(analysis_id)
@@ -209,7 +248,7 @@ class SlackAgent:
 
             raise e
 
-    async def do_basic_research(self, member_info: UserInfo) -> UserResearchData:
+    async def do_basic_research(self, member_info: UserInfo) -> list[UserResearchData]:
         results = []
 
         try:
@@ -230,44 +269,60 @@ class SlackAgent:
         finally:
             return results
 
-    async def get_company_info(self, domain):
+    def is_personal_email(self, email: str) -> bool:
+        personalDomains: list[str] = [
+            "gmail.com",
+            "yahoo.com",
+            "hotmail.com",
+            "outlook.com",
+            "icloud.com",
+        ]
+        domain = email.split("@")[1].lower() if email.split("@")[1] else None
+        return personalDomains.count(domain) > 0
+
+    async def get_company_info(self, domain) -> UserResearchData:
+
         try:
             company_url = f"https://www.{domain}"
             res = httpx.get(
                 company_url, timeout=5000, headers={"User-Agent": "Mozilla/5.0"}
             )
 
-            title_match = re.search(r"<title>(.*?)</title>", res.text, re.IGNORECASE | re.DOTALL)
-            title = title_match.group(1).strip() if title_match else f"Company name: {domain}"
+            title_match = re.search(
+                r"<title>(.*?)</title>", res.text, re.IGNORECASE | re.DOTALL
+            )
+            title = (
+                title_match.group(1).strip()
+                if title_match
+                else f"Company name: {domain}"
+            )
 
             return UserResearchData(
                 url=company_url,
                 title=title,
                 content=f"Company website for {domain}",
-                type=UserResearchDataType.COMPANY
+                type=UserResearchDataType.COMPANY,
             )
-        
+
         except Exception as e:
             log["debug"](f"Could not fetch {domain}", e)
             return None
 
-    async def get_github_info(self, name):
+    async def get_github_info(self, name) -> UserResearchData:
         try:
             url = f"https://api.github.com/search/users?q={name}"
-            res = httpx.get(
-                url, timeout=5000, headers={"User-Agent": "Mozilla/5.0"}
-            )
+            res = httpx.get(url, timeout=5000, headers={"User-Agent": "Mozilla/5.0"})
 
             data = res.json()
 
-            if data and len(data) > 0:
-                user = data[0]
+            if data["items"] and len(data["items"]) > 0:
+                user = data["items"][0]
 
                 return UserResearchData(
-                    url=user.html_url,
-                    title=f"Github: {user.login}",
-                    content=f"{user.public_repos} public repositories",
-                    type=UserResearchDataType.GITHUB
+                    url=user["html_url"],
+                    title=f"Github: {user["login"]}",
+                    content=f"repos url: {user["repos_url"]}",
+                    type=UserResearchDataType.GITHUB,
                 )
         except Exception as e:
             log["debug"](f"Could not fetch github for {name}", e)
@@ -276,17 +331,189 @@ class SlackAgent:
     async def analyze_with_ai(
         self, member_info: UserInfo, research_data: list[UserResearchData]
     ):
-        pass
+        company = os.environ.get("COMPANY_NAME")
+        product = os.environ.get("COMPANY_PRODUCT")
 
-    async def save_member_analysis(
+        prompt = PromptTemplate.from_template(
+            """Analyze this new community member for fit with our commercial 
+        product.
+
+        Company: {company}
+        Product: {product}
+
+        Member:
+        - Name: {name}
+        - Email: {email}
+        - Title: {title}
+
+        Research Data:
+        {research}
+
+        Provide a JSON response with:
+        - fit_score (0-100): likelihood they'd be interested in our product
+        - insights: array of 3-5 key observations
+        - recommendations: array of 2-4 engagement suggestions
+
+        Consider job title, company size, technical background, and budget 
+        authority."""
+        )
+
+        try:
+            if len(research_data) == 0:
+                raise
+
+            research_summary = "\n".join(
+                list(
+                    map(
+                        lambda item: f"{item.title}: {item.content}: {item.url}",
+                        research_data,
+                    )
+                )
+            )
+
+            chain = prompt.pipe(self.gemini)
+
+            result = await chain.ainvoke(
+                {
+                    "name": member_info.name,
+                    "title": member_info.title or "Not provided",
+                    "email": member_info.email or "Not provided",
+                    "research": research_summary,
+                    "company": company,
+                    "product": product,
+                }
+            )
+
+            res_text: str = result.content[0]["text"]
+            cleaned_res = res_text.removeprefix("```json")
+            cleaned_res = cleaned_res.removeprefix("```")
+            cleaned_res = cleaned_res.removesuffix("```")
+            cleaned_res = cleaned_res.strip()
+            # log["info"](f"llm result cleaned: {cleaned_res}")
+            
+            analysis: UserAnalysis = json.loads(cleaned_res)
+
+            return UserAnalysis(
+                fit_score=max(0, min(100, int(analysis["fit_score"] or 50))),
+                insights=(
+                    analysis["insights"]
+                    if isinstance(analysis["insights"], list)
+                    else ["Analysis Completed"]
+                ),
+                recommendations=(
+                    analysis["recommendations"]
+                    if isinstance(analysis["recommendations"], list)
+                    else ["Follow up recommended"]
+                ),
+            )
+
+        except Exception as e:
+            log["error"](f"AI Analysis Error", e)
+
+            return UserAnalysis(
+                fit_score=50,
+                insights=["unable to complete analysis"],
+                recommendations=["Manual review recommended"],
+            )
+
+    async def post_analysis_to_channel(
         self,
         member_info: UserInfo,
         analysis: UserAnalysis,
-        research_data: list[UserResearchData],
     ):
-        pass
+        color = (
+            "#36a64f"
+            if analysis.fit_score >= 80
+            else (
+                "#ffb84d"
+                if analysis.fit_score >= 60
+                else "#ff9500" if analysis.fit_score >= 40 else "#ff4444"
+            )
+        )
 
-    async def post_analysis_to_channel(
+        blocks: list = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"🔍 New Member: {member_info.name}",
+                },
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Fit Score:* {analysis.fit_score}/100",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Email:* {member_info.email or 'Not provided'}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Title:* {member_info.title or 'Not provided'}",
+                    },
+                ],
+            },
+        ]
+
+        if len(analysis.insights) > 0:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f'*Insights:*\n{"\n".join(
+                list(
+                    map(
+                        lambda item: f"{item}",
+                        analysis.insights,
+                    )
+                )
+            )}'},
+                }
+            )
+
+        if len(analysis.recommendations) > 0:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f'*Recommendations:*\n{"\n".join(
+                            list(
+                                map(
+                                    lambda item: f"{item}",
+                                    analysis.recommendations,
+                                )
+                            )
+                        )}'},
+                }
+            )
+
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"📊 Analyzed: {datetime.now().isoformat()}",
+                    }
+                ],
+            }
+        )
+
+        self.webClient.chat_postMessage(
+            channel=os.getenv("SLACK_PRIVATE_CHANNEL_ID"),
+            text=f"New member analysis: {member_info.name} ({analysis.fit_score}/100)",
+            blocks=blocks,
+            attachments=[
+                {
+                    "color": color,
+                }
+            ],
+        )
+
+        log["info"](f"Analysis posted to channel for {member_info.name}")
+
+    async def save_member_analysis(
         self,
         member_info: UserInfo,
         analysis: UserAnalysis,
@@ -301,8 +528,3 @@ class SlackAgent:
 slack = SlackAgent()
 
 app = slack.app
-
-
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(asyncio.to_thread(slack.slack_handler.connect))
