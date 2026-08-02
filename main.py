@@ -7,73 +7,19 @@ from langchain_core.prompts import PromptTemplate
 from dotenv import load_dotenv
 import httpx
 import os
-import asyncio
 from contextlib import asynccontextmanager
 import re
 import json
 from datetime import datetime
-import logging
-from enum import Enum
-from pydantic import BaseModel
+from logger import log
+from models import *
+import db
 
 load_dotenv()
 
 environment = os.getenv("ENVIRONMENT", "development")
 
-logging.basicConfig(level=logging.INFO)
-
-log = {
-    "info": logging.info,
-    "error": logging.error,
-    "warning": logging.warning,
-}
-
-
 client = WebClient()
-
-
-class UserProfileInfo(BaseModel):
-    first_name: str
-    last_name: str
-    status_text: str
-
-
-class MemberInfoReqBody(BaseModel):
-    id: str
-    name: str
-    username: str
-    email: str
-    title: str
-    timezone: str
-    profile: UserProfileInfo
-
-
-class UserInfo(BaseModel):
-    id: str
-    name: str
-    username: str
-    email: str
-    title: str
-    timezone: str
-    profile: UserProfileInfo
-
-
-class UserResearchDataType(Enum):
-    GITHUB = "github"
-    COMPANY = "company"
-
-
-class UserResearchData(BaseModel):
-    url: str
-    title: str
-    content: str
-    type: UserResearchDataType
-
-
-class UserAnalysis(BaseModel):
-    fit_score: int
-    insights: list[str]
-    recommendations: list[str]
 
 
 class SlackAgent:
@@ -95,6 +41,8 @@ class SlackAgent:
             temperature=0.3,
             max_output_tokens=2048,
         )
+
+        self.database_conn = None
 
         self.setup_fast_api()
         self.setup_slack_events()
@@ -140,29 +88,29 @@ class SlackAgent:
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
-        self.start_server()
+        await self.start_server()
         yield
-        self.stop_server()
+        await self.stop_server()
 
-    def start_server(self):
+    async def start_server(self):
         try:
-            log["info"]('🗄️ Initilazing database...')
-            # await init_database()
+            log["info"]("🗄️ Initializing database...")
+            await db.connect_database()
+            await db.init_database()
             slack.slack_handler.connect()
-            log["info"]('⚡️ Slack bot connected')
-            log["info"]('🎉 Slack AI Agent is running!')
+            log["info"]("⚡️ Slack bot connected")
+            log["info"]("🎉 Slack AI Agent is running!")
         except Exception as e:
-            log["error"]('Start up error', e)
+            log["error"]("Start up error", e)
             raise
 
-
-    def stop_server(self):
+    async def stop_server(self):
         try:
             slack.slack_handler.close()
-            # await close_database()
-            log["info"]('Stopped successfully')
+            await db.close_database()
+            log["info"]("Stopped successfully")
         except Exception as e:
-            log["error"]('Shutdown error', e)
+            log["error"]("Shutdown error", e)
             raise
 
     def setup_fast_api(self):
@@ -390,7 +338,7 @@ class SlackAgent:
             cleaned_res = cleaned_res.removesuffix("```")
             cleaned_res = cleaned_res.strip()
             # log["info"](f"llm result cleaned: {cleaned_res}")
-            
+
             analysis: UserAnalysis = json.loads(cleaned_res)
 
             return UserAnalysis(
@@ -519,10 +467,10 @@ class SlackAgent:
         analysis: UserAnalysis,
         research_data: list[UserResearchData],
     ):
-        pass
+        return await db.save_member_analysis(member_info, analysis, research_data)
 
-    async def mark_sent_to_slack(self, analysis_id: str):
-        pass
+    async def mark_sent_to_slack(self, analysis_id: int):
+        await db.mark_sent_to_slack(analysis_id)
 
 
 slack = SlackAgent()
