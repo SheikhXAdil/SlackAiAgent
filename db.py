@@ -14,7 +14,7 @@ async def connect_database():
         dsn=os.getenv("DATABASE_URL"),
         max_size=20,
         max_inactive_connection_lifetime=30,
-        timeout=2,
+        timeout=10,
     )
 
     log["info"]("Database connected")

@@ -34,9 +34,7 @@ class SlackAgent:
             token=os.environ.get("SLACK_BOT_TOKEN"),
             signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
         )
-        self.slack_handler = AsyncSocketModeHandler(
-            self.slack, os.environ["SLACK_APP_TOKEN"]
-        )
+        self.slack_handler = None
         self.webClient = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
 
         self.gemini = ChatGoogleGenerativeAI(
@@ -101,7 +99,12 @@ class SlackAgent:
             log["info"]("🗄️ Initializing database...")
             await db.connect_database()
             await db.init_database()
-            slack.slack_handler.connect()
+
+            self.slack_handler = AsyncSocketModeHandler(
+                self.slack, os.environ["SLACK_APP_TOKEN"]
+            )
+
+            await slack.slack_handler.connect_async()
             log["info"]("⚡️ Slack bot connected")
             log["info"]("🎉 Slack AI Agent is running!")
         except Exception as e:
@@ -455,12 +458,7 @@ class SlackAgent:
         self.webClient.chat_postMessage(
             channel=os.getenv("SLACK_PRIVATE_CHANNEL_ID"),
             text=f"New member analysis: {member_info.name} ({analysis.fit_score}/100)",
-            attachments=[
-                {
-                    "color": color,
-                    "blocks": blocks
-                }
-            ],
+            attachments=[{"color": color, "blocks": blocks}],
         )
 
         log["info"](f"Analysis posted to channel for {member_info.name}")
