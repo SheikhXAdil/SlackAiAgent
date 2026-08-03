@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-from slack_sdk import WebClient
+from slack_sdk.web.async_client import AsyncWebClient
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
@@ -23,9 +23,6 @@ load_dotenv()
 
 environment = os.getenv("ENVIRONMENT", "development")
 
-client = WebClient()
-
-
 class SlackAgent:
     def __init__(self):
         self.app = FastAPI(lifespan=self.lifespan)
@@ -35,7 +32,7 @@ class SlackAgent:
             signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
         )
         self.slack_handler = None
-        self.webClient = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
+        self.webClient = AsyncWebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
 
         self.gemini = ChatGoogleGenerativeAI(
             model="gemini-3.1-flash-lite",
@@ -52,13 +49,11 @@ class SlackAgent:
     def setup_slack_events(self):
         @self.slack.error
         async def handle_slack_error(error):
-            log["error"]("Slack Error", error.message)
+            log["error"]("Slack Error", error)
 
         @self.slack.event("team_join")
         async def handle_team_join(event):
             try:
-                log["info"](f"event: {event}")
-
                 user = event["user"]
                 name = user.get("real_name") or user.get("name")
 
@@ -73,16 +68,14 @@ class SlackAgent:
         @self.slack.event("member_joined_channel")
         async def handle_member_joined_channel(event):
             try:
-                log["info"](f"event: {event}")
-
                 user = event["user"]
                 channel_type = event["channel_type"]
                 channel = event["channel"]
 
-                if channel_type == "c":
+                if channel_type == "C":
                     log["info"](f"Member {user} joined channel {channel}")
 
-                    userInfo = await self.get_user_info(user.get("id"))
+                    userInfo = await self.get_user_info(user)
                     await self.analyze_and_post(userInfo)
 
             except Exception as e:
@@ -113,7 +106,7 @@ class SlackAgent:
 
     async def stop_server(self):
         try:
-            slack.slack_handler.close()
+            await slack.slack_handler.close_async()
             await db.close_database()
             log["info"]("Stopped successfully")
         except Exception as e:
@@ -151,20 +144,21 @@ class SlackAgent:
             }
 
     async def get_user_info(self, userId: str) -> UserInfo:
-        res = await self.webClient.users_info(userId)
-        user = res.user
+        res = await self.webClient.users_info(user=userId)
+
+        user = res["user"]
 
         return UserInfo(
-            id=user.id,
-            username=user.name,
-            timezone=user.tz,
-            name=user.real_name if user.real_name else user.name,
-            email=user.profile.email if user.profile else None,
-            title=user.profile.title if user.profile else None,
+            id=user["id"],
+            username=user["name"],
+            timezone=user["tz"],
+            name=user["real_name"] if user["real_name"] else user["name"],
+            email=user["profile"]["email"] if user["profile"] else None,
+            title=user["profile"]["title"] if user["profile"] else None,
             profile=UserProfileInfo(
-                first_name=user.profile.first_name if user.profile else None,
-                last_name=user.profile.last_name if user.profile else None,
-                status_text=user.profile.status_text if user.profile else None,
+                first_name=user["profile"]["first_name"] if user["profile"] else None,
+                last_name=user["profile"]["last_name"] if user["profile"] else None,
+                status_text=user["profile"]["status_text"] if user["profile"] else None,
             ),
         )
 
@@ -455,7 +449,7 @@ class SlackAgent:
             }
         )
 
-        self.webClient.chat_postMessage(
+        await self.webClient.chat_postMessage(
             channel=os.getenv("SLACK_PRIVATE_CHANNEL_ID"),
             text=f"New member analysis: {member_info.name} ({analysis.fit_score}/100)",
             attachments=[{"color": color, "blocks": blocks}],
