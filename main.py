@@ -8,8 +8,8 @@ import json
 
 from fastapi import FastAPI, HTTPException, Request
 
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_bolt.async_app import AsyncApp
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_sdk import WebClient
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -30,11 +30,11 @@ class SlackAgent:
     def __init__(self):
         self.app = FastAPI(lifespan=self.lifespan)
 
-        self.slack = App(
+        self.slack = AsyncApp(
             token=os.environ.get("SLACK_BOT_TOKEN"),
             signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
         )
-        self.slack_handler = SocketModeHandler(
+        self.slack_handler = AsyncSocketModeHandler(
             self.slack, os.environ["SLACK_APP_TOKEN"]
         )
         self.webClient = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
